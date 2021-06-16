@@ -38,18 +38,29 @@ class RobotEnv(gym.GoalEnv):
 
         self.viewer = None
 
+        # TODO: Is this for BC?
         self.metadata = {
             'render.modes': ['human', 'rgb_array'],
             'video.frames_per_second': int(np.round(1.0 / self.dt))
         }
 
         self.seed()
+
+        # Set the Initial State
         self._env_setup(initial_qpos=initial_qpos)
         self.initial_state = copy.deepcopy(self.sim.get_state())
 
+        # Get Goals for 1 or multiple objects
         self.goal = self._sample_goal()
+
+        # Get observations for one or multiple objects
         obs = self._get_obs()
+
+        # Determine the action space
         self.action_space = spaces.Box(-1., 1., shape=(n_actions,), dtype='float32')
+        
+        
+        # Determine the observation space
         if "dict" in self.obs_type:
             self.observation_space = spaces.Dict(dict(
                 desired_goal=spaces.Box(-np.inf, np.inf, shape=obs['achieved_goal'].shape, dtype='float32'),
@@ -64,7 +75,7 @@ class RobotEnv(gym.GoalEnv):
 
     @property
     def dt(self):
-        return self.sim.model.opt.timestep * self.sim.nsubsteps
+        return self.sim.model.opt.timestep * self.sim.nsubsteps # dt for the RL loop is the total amount of time taken across substeps in the control loop
 
     # Env methods
     # ----------------------------
@@ -74,6 +85,14 @@ class RobotEnv(gym.GoalEnv):
         return [seed]
 
     def step(self, action):
+        '''
+        1. Clips actions within the min/max limits
+        2. Set them to the robot and fingers
+        3. advance the simulation and do forward computations
+
+        5. Get new observations s', r, done, info
+            - If image: TODO study these computations
+        '''
         action = np.clip(action, self.action_space.low, self.action_space.high)
         self._set_action(action)
         self.sim.step()
@@ -83,7 +102,7 @@ class RobotEnv(gym.GoalEnv):
         done = False
 
         if "image" in self.obs_type:
-            reward = self.compute_reward_image()
+            reward = self.compute_reward_image() # 
             if reward < .05:
                 info = {
                     'is_success': True,
@@ -109,18 +128,18 @@ class RobotEnv(gym.GoalEnv):
         # configuration.
         did_reset_sim = False
         while not did_reset_sim:
-            did_reset_sim = self._reset_sim()
-        self.goal = self._sample_goal().copy()
-        obs = self._get_obs()
+            did_reset_sim = self._reset_sim()   # reset simulation.
+        self.goal = self._sample_goal().copy()  # add noise to init pos. varies according to strategy. TODO: currently appending orientation at the end once regardless # of objs
+        obs = self._get_obs()                   # [observations, achieved goal, and desired goal]
         return obs
 
     def close(self):
         if self.viewer is not None:
-            # self.viewer.finish()
+            #self.viewer.finish()
             self.viewer = None
 
     def render(self, mode='human', size=None):
-        self._render_callback()
+        self._render_callback() # Updates target sites and calls sim.forward()
         if mode == 'rgb_array':
             size=800
             # window size used for old mujoco-py:
@@ -136,7 +155,7 @@ class RobotEnv(gym.GoalEnv):
     def _get_viewer(self):
         if self.viewer is None:
             self.viewer = mujoco_py.MjViewer(self.sim)
-            self._viewer_setup()
+            self._viewer_setup() # Sets the viewer to point to the robot location from some elevation/azimuth/angle
         return self.viewer
 
     # Extension methods

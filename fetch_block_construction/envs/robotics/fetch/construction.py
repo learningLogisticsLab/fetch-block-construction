@@ -1,12 +1,19 @@
 import os
+import tempfile
+import numpy as np
+
+# Gym
 from gym import utils as gym_utils
+
+# Fetch
 from fetch_block_construction.envs.robotics import utils
 from fetch_block_construction.envs.robotics import fetch_env, rotations
-import numpy as np
+
+# Mujoco
 import mujoco_py
 from .xml import generate_xml
-import tempfile
 
+# Key class to construct the Fetch environment
 
 class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
     def __init__(self, initial_qpos,
@@ -16,6 +23,7 @@ class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
                  render_size=42,
                  stack_only=False,
                  case="Singletower"):
+
         self.num_blocks = num_blocks
         self.object_names = ['object{}'.format(i) for i in range(self.num_blocks)]
         self.stack_only = stack_only
@@ -69,19 +77,22 @@ class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
         subgoal_distances = self.subgoal_distances(achieved_goal, goal)
         if self.reward_type == 'incremental':
             # Using incremental reward for each block in correct position
-            reward = -np.sum([(d > self.distance_threshold).astype(np.float32) for d in subgoal_distances], axis=0)
+            reward = -np.sum([(d > self.distance_threshold).astype(np.float32) for d in subgoal_distances], axis=0) # If your distance is greather than treshhold, reward += -1. Range is [-num_blocks:0]
             reward = np.asarray(reward)
 
-            # If blocks are successfully aligned with goals, add a bonus for the gripper being away from the goals
-            np.putmask(reward, reward == 0, self.gripper_pos_far_from_goals(achieved_goal, goal))
+            # Normal success comes with reward of 0. But, if blocks are successfully aligned with goals (i.e. reward == 0) and the gripper is far away from the goals, change reward to 1 with this mask
+            np.putmask(reward, reward == 0, self.gripper_pos_far_from_goals(achieved_goal, goal)) # putmask(a, mask, values): sets a to value if mask is true for index
             return reward
+        
         elif self.reward_type == 'block1only':
             return -(subgoal_distances[0] > self.distance_threshold).astype(np.float32)
+        
         elif self.reward_type == "sparse":
             reward = np.min([-(d > self.distance_threshold).astype(np.float32) for d in subgoal_distances], axis=0)
             reward = np.asarray(reward)
             np.putmask(reward, reward == 0, self.gripper_pos_far_from_goals(achieved_goal, goal))
             return reward
+        
         elif self.reward_type == "dense":
             # Dense incremental
             stacked_reward = -np.sum([(d > self.distance_threshold).astype(np.float32) for d in subgoal_distances], axis=0)
@@ -97,62 +108,87 @@ class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
                 block_goals = goal[..., :-3]
                 reward -= .01 * np.linalg.norm(gripper_pos - block_goals[next_block_id*3: (next_block_id+1)*3])
             return reward
+        
         else:
             raise ("Reward not defined!")
 
-    def _get_obs(self):
-        # positions
-        grip_pos = self.sim.data.get_site_xpos('robot0:grip')
-        dt = self.sim.nsubsteps * self.sim.model.opt.timestep
-        grip_velp = self.sim.data.get_site_xvelp('robot0:grip') * dt
-        robot_qpos, robot_qvel = utils.robot_get_obs(self.sim)
+    def _get_obs(self): 
+        '''
+        1. Compute observations [grip_xyz, f1x, f2x, grip_vxyz, f1v, f2v, obj1_pos, rel_pos_wrt_gripp_obj, obj1_theta, obj1_vxyz, obj1_dtheta obj2... ]
+        2. Achieved goal: [obj1_pos obj2_pos ... objn_pos grip_xyz]
+        3. Desired goal: goal obtained in ._sample_goal()
+        '''
 
-        gripper_state = robot_qpos[-2:]
-        gripper_vel = robot_qvel[-2:] * dt  # change to a scalar if the gripper is made symmetric
+        # Gripper: pos and vel 
+        grip_pos    = self.sim.data.get_site_xpos('robot0:grip')
+        dt          = self.sim.nsubsteps * self.sim.model.opt.timestep  # dt is equivalent to the number of substeps in controller times duration of substep  
+        grip_velp   = self.sim.data.get_site_xvelp('robot0:grip') * dt  # xvelp is the step vel (??) but needs to be scaled by dt such that we get the instantaneous velocity?
+        
+        # Finger: Extract robot joints and velocities to get finger data
+        robot_qpos, robot_qvel = utils.robot_get_obs(self.sim)          # retrun joint angles and joint velocities for each of the robot's joints including fingers.
+        gripper_state = robot_qpos[-2:]       # Extract gripper pos
+        gripper_vel   = robot_qvel[-2:] * dt  # Compute gripper vel
 
+        # Obs: basic info is [ee_pos, grip_pos, ee_vel, grip_vel]
         obs = np.concatenate([
             grip_pos,
             gripper_state,
             grip_velp,
             gripper_vel,
         ])
+        
+        #-------------------------------------------------------------------------- 
+        # Achieved Goal + other strucs for obs
+        #-------------------------------------------------------------------------- 
+        achieved_goal = [] 
 
-        achieved_goal = []
-        for i in range(self.num_blocks):
-            object_i_pos = self.sim.data.get_site_xpos(self.object_names[i])
-            # rotations
+        # For n objects
+        for i in range(self.num_blocks): 
+
+            # Get xyz pos ob ith obj
+            object_i_pos = self.sim.data.get_site_xpos(self.object_names[i]) 
+
+            # Orientation: RPY
             object_i_rot = rotations.mat2euler(self.sim.data.get_site_xmat(self.object_names[i]))
-            # velocities
-            object_i_velp = self.sim.data.get_site_xvelp(self.object_names[i]) * dt
+            
+            # Linear and Angular Velocity
+            object_i_velp = self.sim.data.get_site_xvelp(self.object_names[i]) * dt # Will get overwritten by robot's velocity
             object_i_velr = self.sim.data.get_site_xvelr(self.object_names[i]) * dt
-            # gripper state
+            
+            # Relative position difference with robot gripper (no relative orientation difference)
             object_i_rel_pos = object_i_pos - grip_pos
+
+            # Overwrite with robots linear velocity
             object_i_velp -= grip_velp
 
+            # <<Augmente observations>>
             obs = np.concatenate([
-                obs,
-                object_i_pos.ravel(),
-                object_i_rel_pos.ravel(),
-                object_i_rot.ravel(),
-                object_i_velp.ravel(),
-                object_i_velr.ravel()
+                obs,                                # Robot
+                object_i_pos.ravel(),               # Stack objs: pos
+                object_i_rel_pos.ravel(),           # delta x, delta y, delta z (wrt gripper)
+                object_i_rot.ravel(),               # orientation: rpy
+                object_i_velp.ravel(),              # vx, vy, vz
+                object_i_velr.ravel()               # dr dp dy
             ])
 
+            # 01 Achieved goal takes as many object positions as there are objects
             achieved_goal = np.concatenate([
                 achieved_goal, object_i_pos.copy()
             ])
 
-        # Append the grip
-
+        # Finally, append the robot's grip xyz 
+        # Achieved goal: why not differentiate between object in hand or not like original fetch?
         achieved_goal = np.concatenate([achieved_goal, grip_pos.copy()])
-
         achieved_goal = np.squeeze(achieved_goal)
 
+        # Returns obs, ag, and also desired goals
         return_dict = {
-            'observation': obs.copy(),
+            'observation':   obs.copy(),
             'achieved_goal': achieved_goal.copy(),
-            'desired_goal': self.goal.copy(),
+            'desired_goal':  self.goal.copy(),
         }
+
+        ## Images
         # if self.obs_type == 'dictimage':
         if hasattr(self, "render_image_obs") and self.render_image_obs:
             return_dict['image_observation'] = self.render(mode='rgb_array')
@@ -170,31 +206,41 @@ class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
         self.sim.forward()
 
     def _reset_sim(self):
+        '''
+        1. extract the fixed initial state of the robot 
+        2. Objects: computed a des random pos with uniform noise in [-01.5,0.15] and add to ee pos 
+        3. Get actual object pos via get_joint_qpos and then update xy with des pos 
+        4. set a fixed hieght 
+        5. Set in simulation 
+        6. step sim forward
+        '''
         assert self.num_blocks <= 17 # Cannot sample collision free block inits with > 17 blocks
         self.sim.set_state(self.initial_state)
 
         # Randomize start position of objects.
-
         prev_obj_xpos = []
 
         for obj_name in self.object_names:
-            object_xypos = self.initial_gripper_xpos[:2] + self.np_random.uniform(-self.obj_range, self.obj_range, size=2)
+            object_xypos = self.initial_gripper_xpos[:2] + self.np_random.uniform(-self.obj_range, self.obj_range, size=2) # Rojas: why set to initial gripper pos? does robot gripper go there?
 
-            while not ((np.linalg.norm(object_xypos - self.initial_gripper_xpos[:2]) >= 0.1) and np.all([np.linalg.norm(object_xypos - other_xpos) >= 0.06 for other_xpos in prev_obj_xpos])):
+            while not ((np.linalg.norm(object_xypos - self.initial_gripper_xpos[:2]) >= 0.1) and np.all([np.linalg.norm(object_xypos - other_xpos) >= 0.06 for other_xpos in prev_obj_xpos])): # goal pos must be at least 10cm away from gripper pos and must be at least 6cm away from previous pos
                 object_xypos = self.initial_gripper_xpos[:2] + self.np_random.uniform(-self.obj_range, self.obj_range, size=2)
 
 
             prev_obj_xpos.append(object_xypos)
 
-            object_qpos = self.sim.data.get_joint_qpos(F"{obj_name}:joint")
+            object_qpos = self.sim.data.get_joint_qpos(F"{obj_name}:joint")     # Object's pose|twist
             assert object_qpos.shape == (7,)
-            object_qpos[:2] = object_xypos
-            object_qpos[2] = self.height_offset
+
+            object_qpos[:2] = object_xypos          # xy
+            object_qpos[2] = self.height_offset     # z
+
             self.sim.data.set_joint_qpos(F"{obj_name}:joint", object_qpos)
-            self.sim.forward()
+            self.sim.forward()                      # Take simulation step and perform all calculations
+
         return True
 
-    def _sample_goal(self):
+    def _sample_goal(self): # Adapts according to case. SingleTower
         cases = ["Singletower", "Pyramid", "Multitower"]
         if self.case == "All":
             case_id = np.random.randint(0, len(cases))
@@ -206,14 +252,17 @@ class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
 
         goals = []
 
-        if case == "Singletower":
+        if case == "Singletower": 
+            # Add random noise to xyz of init_grip_xpos. Then for z, 50% add rand noize from [0,0.45]
+          
             goal_object0 = self.initial_gripper_xpos[:3] + self.np_random.uniform(-self.target_range, self.target_range,
-                                                                                  size=3)
+                                                                                  size=3) 
             goal_object0 += self.target_offset
-            goal_object0[2] = self.height_offset
-
-            if self.target_in_the_air and self.np_random.uniform() < 0.5 and not self.stack_only:
-                # If we're only stacking, do not allow the block0 to be in the air
+            goal_object0[2] = self.height_offset                        # Fix goal height unless place object in air below
+            
+            # HER Strategy: sample object in air half the time
+            # If we're only stacking, do not allow the block0 to be in the air
+            if self.target_in_the_air and self.np_random.uniform() < 0.5 and not self.stack_only:                 
                 goal_object0[2] += self.np_random.uniform(0, 0.45)
 
             # Start off goals array with the first block
@@ -224,7 +273,7 @@ class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
             current_tower_heights = [goal_object0[2]]
 
             num_configured_blocks = self.num_blocks - 1
-
+            # Set goal for other objects: objecti_xy
             for i in range(num_configured_blocks):
                 if hasattr(self, "stack_only") and self.stack_only:
                     # If stack only, use the object0 position as a base
@@ -413,7 +462,7 @@ class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
         else:
             raise NotImplementedError
 
-        goals.append([0.0, 0.0, 0.0])
+        goals.append([0.0, 0.0, 0.0]) # Orientation in Euler angles fixed to 0. Concat to goals before returning. TODO: for multiple blocks should this be added to each block? right now only added at very end....
         return np.concatenate(goals, axis=0).copy()
 
     def _is_success(self, achieved_goal, desired_goal):
@@ -430,25 +479,31 @@ class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
 
         pos_ctrl *= 0.05  # limit maximum change in position
         rot_ctrl = [1., 0., 1., 0.]  # fixed rotation of the end effector, expressed as a quaternion
-        gripper_ctrl = np.array([gripper_ctrl, gripper_ctrl])
+        gripper_ctrl = np.array([gripper_ctrl, gripper_ctrl]) # extend command for both fingers
         assert gripper_ctrl.shape == (2,)
         if self.block_gripper:
             gripper_ctrl = np.zeros_like(gripper_ctrl)
         action = np.concatenate([pos_ctrl, rot_ctrl, gripper_ctrl])
 
         # Apply action to simulation.
-        utils.ctrl_set_action(self.sim, action)
+        utils.ctrl_set_action(self.sim, action) # Updates gripper via sim.data.ctrl
         utils.mocap_set_action(self.sim, action)
 
-    def step(self, action):
+    def step(self, action): 
+        '''
+        1) Take clipped actions, 
+        2) Set action values in appropriate data strucs for gripper and ee, 
+        3) Step simulation forward, 
+        4) Retrieve observations, done, rewards
+        '''
         action = np.clip(action, self.action_space.low, self.action_space.high)
-        self._set_action(action)
+        self._set_action(action) # Pass action to robot (gripper and ee)
         try:
-            self.sim.step()
+            self.sim.step() # Advance simulation
         except mujoco_py.builder.MujocoException as e:
             print(e)
             print(F"action {action}")
-        self._step_callback()
+        self._step_callback() # Used when gripper set to be blocked/closed. 
         obs = self._get_obs()
 
         done = False
