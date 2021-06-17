@@ -16,6 +16,11 @@ from .xml import generate_xml
 # Key class to construct the Fetch environment
 
 class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
+    '''
+    First assign parameters related to the block construction environment. 
+    After that call the fetch_env.FetchEnv class to generate it (includes strategies related to HER)
+    '''
+
     def __init__(self, initial_qpos,
                  num_blocks=1,
                  reward_type='incremental',
@@ -33,14 +38,26 @@ class FetchBlockConstructionEnv(fetch_env.FetchEnv, gym_utils.EzPickle):
         # MODEL_XML_PATH = os.path.join('fetch', F'stack{self.num_blocks}.xml')
 
         with tempfile.NamedTemporaryFile(mode='wt', dir=F"{os.path.dirname(os.path.dirname(os.path.realpath(__file__)))}/assets/fetch/", delete=False, suffix=".xml") as fp:
-            fp.write(generate_xml(self.num_blocks))
+            fp.write(generate_xml(self.num_blocks)) # Generates an xml file based on the number of objects. 
             MODEL_XML_PATH = fp.name
 
+        # Call parent Fetch Class with fundamental parameters to create the environment. 
         fetch_env.FetchEnv.__init__(
-            self, MODEL_XML_PATH, has_object=True, block_gripper=False, n_substeps=20,
-            gripper_extra_height=0.2, target_in_the_air=True, target_offset=0.0,
-            obj_range=0.15, target_range=0.15, distance_threshold=0.05,
-            initial_qpos=initial_qpos, reward_type=reward_type, obs_type=obs_type, render_size=render_size)
+                                    self, 
+                                    MODEL_XML_PATH, 
+                                    has_object          = True, # how does this option affect the construction of the environment. Is it: has object all the time, or has object in the hand 50% of the time?
+                                    block_gripper       = False, 
+                                    n_substeps          = 20,
+                                    gripper_extra_height= 0.2, 
+                                    target_in_the_air   = True, 
+                                    target_offset       = 0.0,
+                                    obj_range           = 0.15, 
+                                    target_range        = 0.15, 
+                                    distance_threshold  = 0.05,
+                                    initial_qpos        = initial_qpos, 
+                                    reward_type         = reward_type, 
+                                    obs_type            = obs_type, 
+                                    render_size         = render_size)
 
         os.remove(MODEL_XML_PATH)
 

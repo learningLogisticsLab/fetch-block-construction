@@ -1,4 +1,6 @@
 from .colors import get_colors
+
+# Colors for upto six blocks
 BASIC_COLORS = ["0 1 0", "1 1 0", "0.2 0.8 0.8", "0.8 0.2 0.8", "1.0 0.0 0.0", "0 0 0"]
 
 base = '''<?xml version="1.0" encoding="utf-8"?>
@@ -46,6 +48,8 @@ def generate_xml(num_blocks):
         colors = BASIC_COLORS[:num_blocks]
     else:
         colors = get_colors(num_blocks)
+
+    # Create mujoco xml lines to define sites/assets and body. Variables filled later. 
     site_base = '<site name="target{id}" pos="0 0 0.5" size="0.02 0.02 0.02" rgba="{color} 0.3" type="sphere"></site>'
     block_base = '''<body name="object{id}" pos="0.025 0.025 0.025">
         <joint name="object{id}:joint" type="free" damping="0.01"></joint>
@@ -54,12 +58,16 @@ def generate_xml(num_blocks):
     </body>'''
     asset_base = '<material name="block{id}_mat" specular="0" shininess="0.5" reflectance="0" rgba="{color} 1"></material>'
 
-    sites = []
+    # GEnerate sites, bodies, and assets for the assigned number of objects
+    sites        = []
     block_bodies = []
-    assets = []
+    assets       = []
+
+    # Creates lists of xml lines that include corred id/color values for sites/bodies/assets. Used later to create a final correct xml. 
     for i in range(num_blocks):
         sites.append(site_base.format(**dict(id=i, color=colors[i])))
         block_bodies.append(block_base.format(**dict(id=i)))
         assets.append(asset_base.format(**dict(id=i, color=colors[i])))
 
+    # Modifies the core base xml format by providing the corret set of lists for sites, blocks, and assets. 
     return base.format(**dict(assets="\n".join(assets), target_sites="\n".join(sites), object_bodies="\n".join(block_bodies)))
